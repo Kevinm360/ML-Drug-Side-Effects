@@ -1,0 +1,15 @@
+artifact_uri: file:C:/Machine Learning/side_effects/mlruns/199570744066090628/722b4eebb6e548a0b97129549695410a/artifacts
+end_time: 1756959401721
+entry_point_name: ''
+experiment_id: '199570744066090628'
+lifecycle_stage: active
+run_id: 722b4eebb6e548a0b97129549695410a
+run_name: fun-seal-646
+run_uuid: 722b4eebb6e548a0b97129549695410a
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1756959398106
+status: 3
+tags: []
+user_id: kevin

@@ -1,0 +1,46 @@
+name: Weekly FAERS Alerts
+
+on:
+  schedule:
+    - cron: "15 13 * * 1"   # Mondays 09:15 ET (13:15 UTC, adjust as you like)
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run weekly alerts
+        env:
+          OPENFDA_API_KEY: ${{ secrets.OPENFDA_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          EMAIL_HOST: ${{ secrets.EMAIL_HOST }}
+          EMAIL_PORT: ${{ secrets.EMAIL_PORT }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO:   ${{ secrets.EMAIL_TO }}
+          MONITORED_DRUGS: "IBUPROFEN,ACETAMINOPHEN,METFORMIN"  # or put in secrets if sensitive
+          PRR_MIN: "2.0"
+          CHI2_MIN: "4.0"
+          MIN_REPORTS: "5"
+          Z_MIN: "2.0"
+          TOP_N_PER_DRUG: "15"
+          SERIOUS_ONLY: "false"
+          SEARCH_EXTRA: ""
+        run: python jobs/weekly_alerts.py
+
+      - name: Upload alert artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: alerts-json
+          path: alerts/*.json

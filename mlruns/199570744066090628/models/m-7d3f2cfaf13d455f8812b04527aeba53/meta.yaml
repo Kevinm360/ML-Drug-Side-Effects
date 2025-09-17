@@ -1,0 +1,10 @@
+artifact_location: file:C:/Machine Learning/side_effects/mlruns/199570744066090628/models/m-7d3f2cfaf13d455f8812b04527aeba53/artifacts
+creation_timestamp: 1757990190583
+experiment_id: '199570744066090628'
+last_updated_timestamp: 1757990193088
+model_id: m-7d3f2cfaf13d455f8812b04527aeba53
+model_type: null
+name: model
+source_run_id: 99ce077ba5b140edafac596176e99013
+status: 2
+status_message: null

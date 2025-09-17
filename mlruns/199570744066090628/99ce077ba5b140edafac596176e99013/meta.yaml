@@ -1,0 +1,14 @@
+artifact_uri: file:C:/Machine Learning/side_effects/mlruns/199570744066090628/99ce077ba5b140edafac596176e99013/artifacts
+end_time: 1757990193110
+entry_point_name: ''
+experiment_id: '199570744066090628'
+lifecycle_stage: active
+run_id: 99ce077ba5b140edafac596176e99013
+run_name: marvelous-auk-787
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1757990190477
+status: 3
+tags: []
+user_id: kevin

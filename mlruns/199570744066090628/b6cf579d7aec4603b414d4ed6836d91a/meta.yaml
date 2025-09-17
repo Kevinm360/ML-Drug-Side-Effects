@@ -1,0 +1,15 @@
+artifact_uri: file:C:/Machine Learning/side_effects/mlruns/199570744066090628/b6cf579d7aec4603b414d4ed6836d91a/artifacts
+end_time: 1757258235416
+entry_point_name: ''
+experiment_id: '199570744066090628'
+lifecycle_stage: active
+run_id: b6cf579d7aec4603b414d4ed6836d91a
+run_name: abundant-frog-722
+run_uuid: b6cf579d7aec4603b414d4ed6836d91a
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1757258232095
+status: 3
+tags: []
+user_id: kevin

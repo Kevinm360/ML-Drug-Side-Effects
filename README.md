@@ -4,6 +4,10 @@
 Detect and visualize potential adverse drug event (ADE) signals using FDA’s FAERS data. The dashboard helps pharmacovigilance analysts and researchers spot unusual trends, bursts, or disproportionality in side effect reports to prioritize investigations.
 
 ---
+## 🧭 Visual Demo
+
+*(Below is a GIF demonstration of the dashboard in action)*  
+![Dashboard Demo](demo.gif)
 
 ## 📊 Summary of Insights
 

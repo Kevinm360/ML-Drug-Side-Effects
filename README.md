@@ -1,5 +1,5 @@
 # Side Effects Signal Detection Dashboard
-
+![Dashboard Preview](screenshot.png)  
 ## 🎯 Project Purpose  
 Detect and visualize potential adverse drug event (ADE) signals using FDA’s FAERS data. The dashboard helps pharmacovigilance analysts and researchers spot unusual trends, bursts, or disproportionality in side effect reports to prioritize investigations.
 

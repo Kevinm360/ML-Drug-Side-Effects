@@ -35,6 +35,7 @@ Detect and visualize potential adverse drug event (ADE) signals using FDA’s FA
 - **Data Source:** openFDA / FAERS adverse event reports  
 - **Processing & Metrics:** pandas, NumPy, scikit-learn  
 - **Signal Models:** disproportionality (PRR, ROR), burst detection algorithm  
+- **Report-level classification:** Logistic Regression and XGBoost prediction of the FAERS `serious` report label
 - **App / Dashboard:** Streamlit + Plotly / Altair  
 - **Automation / Jobs:** weekly_alerts.py (schedules alerts), data ingestion scripts  
 - **API Layer (optional):** Flask endpoint (e.g. `/signals?drug=`)  
@@ -49,3 +50,35 @@ git clone https://github.com/Kevinm360/ML-Drug-Side-Effects.git
 cd ML-Drug-Side-Effects
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+## Serious Outcome Classification
+
+The dashboard includes a separate **Serious Outcome Classification** section that retrieves
+real report-level FAERS records for the selected drug, date range, and cohort. It predicts the
+report's binary `serious` label and compares an interpretable Logistic Regression baseline with
+an XGBoost classifier. Holdout reporting emphasizes precision, recall, F1, ROC-AUC, and PR-AUC
+(average precision), with ROC and precision–recall curves, threshold-sensitive confusion
+matrices, held-out probability distributions, Logistic Regression coefficients, and the top 15
+XGBoost feature importances. An interactive threshold control updates precision, recall, F1, and
+the confusion matrix without retraining either model.
+
+The evaluation also runs a paired proxy-metadata ablation. The full and reduced variants use
+the exact same train/test rows. The reduced variant removes reporter qualification, reporter and
+source/occurrence countries, report type, subject-drug role, and drug-role counts so users can
+see how much held-out discrimination depends on reporting-system metadata. The dashboard audits
+every predictor and flags retained drug/reaction counts, route, and missingness as possible
+non-causal reporting or case-complexity proxies that still require cautious interpretation.
+
+The model uses an explicit allowlist of non-outcome variables such as available demographics,
+reporter/report characteristics, counts of listed drugs and reactions, drug-role counts, and
+administration route. Direct seriousness flags, death, hospitalization, life-threatening,
+disabling, congenital, and other outcome fields, reaction outcomes, and the existing derived
+severity score are excluded to reduce target leakage. Preprocessing is fit on training data only.
+An older-to-newer chronological split is used when dates and class coverage support it; otherwise
+the app clearly reports its stratified 80/20 fallback.
+
+FAERS is a spontaneous-reporting system with under-reporting, duplicates, missing data, reporting
+bias, and no denominator for exposed patients. The classifier learns associations in submitted
+reports: its predictions do **not** establish causality, the probability of an adverse event, or
+an individual's clinical risk, and should not guide patient care.

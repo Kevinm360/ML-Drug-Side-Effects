@@ -1,6 +1,7 @@
 pandas==2.2.2
 numpy==1.26.4
 scikit-learn==1.5.2
+xgboost>=2.1,<4
 scipy==1.16.2
 duckdb==1.0.0
 prefect==2.19.9           # only if needed by the app

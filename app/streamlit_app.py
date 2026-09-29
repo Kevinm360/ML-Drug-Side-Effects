@@ -40,6 +40,30 @@ except Exception as e:
     st.code("".join(traceback.format_exception(e)))
     raise
 
+# Keep the report-level classifier optional at app startup so a model-specific
+# dependency problem cannot take down the existing signal dashboard.
+try:
+    serious_outcome = importlib.import_module("serious_outcome")
+    train_seriousness_models = getattr(serious_outcome, "train_seriousness_models")
+except Exception as e:
+    serious_outcome = None
+    train_seriousness_models = None
+    SERIOUS_OUTCOME_IMPORT_ERROR = "".join(traceback.format_exception_only(type(e), e)).strip()
+
+_cache_resource = getattr(st, "cache_resource", None)
+if _cache_resource is None:
+    _cache_resource = st.cache
+
+@_cache_resource(show_spinner=False)
+def _train_seriousness_cached(
+    report_frame: pd.DataFrame,
+    implementation_version: str = "proxy-ablation-v2",
+):
+    if train_seriousness_models is None:
+        raise RuntimeError("Serious-outcome model module is unavailable.")
+    _ = implementation_version  # Explicitly invalidate cached results after model-contract changes.
+    return train_seriousness_models(report_frame)
+
 from faers_client import (
     timeseries as faers_timeseries,
     top_reactions as faers_top,
@@ -47,6 +71,7 @@ from faers_client import (
     popular_drugs as faers_popular,
     reaction_counts_all,  # aggregate PT totals across all drugs
     build_cohort_query,   # ← NEW: use cohort filters everywhere
+    report_level_reports as faers_report_level,
 )
 
 # Small constant for logs/clips used locally here
@@ -489,7 +514,10 @@ sig = st.session_state.get("signals")
 tsz = st.session_state.get("ts_bursts")
 
 # ---------- Persistent top navigation (no more tab resets) ----------
-TAB_LABELS = ["Overview", "Reactions", "Reports", "Signals", "Severity", "Graph", "Narratives NLP"]
+TAB_LABELS = [
+    "Overview", "Reactions", "Reports", "Signals", "Severity", "Graph",
+    "Serious Outcome Classification", "Narratives NLP",
+]
 
 active_tab = st.radio(
     "Sections",
@@ -939,6 +967,522 @@ elif active_tab == "Graph":
         )
         st_html(html_str, height=860, scrolling=True)
         st.caption("Tip: drag nodes, use the wheel to zoom, and open the Physics panel to tweak layout.")
+
+# ====== Serious Outcome Classification ======
+elif active_tab == "Serious Outcome Classification":
+    st.subheader("Serious Outcome Classification")
+    st.caption(
+        "Report-level supervised learning on real FAERS records. The target is whether the "
+        "report itself has serious=1; results describe predictive associations, not causes, "
+        "clinical risk, or treatment effects."
+    )
+
+    if serious_outcome is None:
+        st.error(
+            "This optional section could not be loaded. The rest of the dashboard remains "
+            f"available. Details: {SERIOUS_OUTCOME_IMPORT_ERROR}"
+        )
+    else:
+        with st.expander("Predictor and leakage audit", expanded=True):
+            st.markdown("**Predictor-by-predictor proxy audit**")
+            st.dataframe(
+                serious_outcome.feature_audit(),
+                width="stretch",
+                hide_index=True,
+            )
+            st.caption(
+                "The reduced model removes high-risk administrative, geography, reporter, and "
+                "drug-role coding fields. No separate report-source variable is in the current "
+                "allowlist; FAERS report type is the closest submission-pathway field."
+            )
+            audit_left, audit_right = st.columns(2)
+            with audit_left:
+                st.markdown("**Excluded for target-leakage risk**")
+                for excluded in serious_outcome.LEAKAGE_EXCLUSIONS:
+                    st.write(f"- {excluded}")
+            with audit_right:
+                st.markdown("**Excluded for identity/high-cardinality reasons**")
+                for excluded in serious_outcome.OTHER_EXCLUSIONS:
+                    st.write(f"- {excluded}")
+            st.caption(
+                "Missing values and categorical encoding are fitted inside each model pipeline "
+                "using training data only. Extra source columns cannot enter the model because "
+                "the pipeline selects only its declared full or reduced allowlist. Retained drug "
+                "and reaction counts can still proxy report complexity and should not be read as "
+                "clinical effects."
+            )
+
+        limit_col, action_col = st.columns([1, 2])
+        report_limit = int(limit_col.number_input(
+            "Maximum reports",
+            min_value=200,
+            max_value=5000,
+            value=3000,
+            step=200,
+            help="openFDA is queried in cached pages of up to 1,000 reports.",
+            key="serious_report_limit",
+        ))
+        current_data_key = (
+            st.session_state.get("drug_final"),
+            st.session_state.get("start"),
+            st.session_state.get("end"),
+            st.session_state.get("age_group"),
+            tuple(sorted(st.session_state.get("sexes", []))),
+            tuple(sorted(st.session_state.get("reporters", []))),
+            report_limit,
+        )
+
+        with action_col:
+            st.write("")
+            fetch_reports = st.button(
+                "Fetch report-level FAERS data",
+                type="primary",
+                key="fetch_serious_reports",
+                help="Fetches only when clicked; identical requests use the one-hour cache.",
+            )
+
+        if fetch_reports:
+            try:
+                with st.spinner("Fetching report-level records from openFDA…"):
+                    report_frame = faers_report_level(
+                        st.session_state["drug_final"],
+                        st.session_state["start"],
+                        st.session_state["end"],
+                        max_records=report_limit,
+                        search_extra=build_cohort_query(
+                            age_group=(
+                                st.session_state.get("age_group")
+                                if st.session_state.get("age_group") != "All" else None
+                            ),
+                            sexes=st.session_state.get("sexes"),
+                            reporters=st.session_state.get("reporters"),
+                        ),
+                    )
+                st.session_state["serious_report_frame"] = report_frame
+                st.session_state["serious_report_data_key"] = current_data_key
+                st.session_state.pop("serious_model_result", None)
+                st.session_state.pop("serious_model_data_key", None)
+            except Exception as exc:
+                st.error(
+                    "Report-level retrieval failed; existing dashboard sections are unaffected. "
+                    f"Details: {exc}"
+                )
+
+        report_frame = st.session_state.get("serious_report_frame")
+        data_is_current = st.session_state.get("serious_report_data_key") == current_data_key
+        if report_frame is not None and not data_is_current:
+            st.info("Filters or the report limit changed. Fetch again before training.")
+            report_frame = None
+
+        if isinstance(report_frame, pd.DataFrame) and not report_frame.empty:
+            counts = report_frame["serious"].value_counts().reindex([0, 1], fill_value=0)
+            class_frame = pd.DataFrame({
+                "class": ["Non-serious", "Serious"],
+                "reports": [int(counts.loc[0]), int(counts.loc[1])],
+            })
+            class_frame["share"] = class_frame["reports"] / max(1, class_frame["reports"].sum())
+
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Reports retrieved", f"{len(report_frame):,}")
+            k2.metric("Serious", f"{int(counts.loc[1]):,}", f"{counts.loc[1] / len(report_frame):.1%}")
+            k3.metric("Non-serious", f"{int(counts.loc[0]):,}", f"{counts.loc[0] / len(report_frame):.1%}")
+
+            distribution_chart = (
+                alt.Chart(class_frame)
+                .mark_bar()
+                .encode(
+                    x=alt.X("class:N", title="FAERS seriousness label"),
+                    y=alt.Y("reports:Q", title="Reports"),
+                    color=alt.Color(
+                        "class:N",
+                        scale=alt.Scale(
+                            domain=["Non-serious", "Serious"],
+                            range=["#4e79a7", "#e15759"],
+                        ),
+                        legend=None,
+                    ),
+                    tooltip=["class:N", alt.Tooltip("reports:Q", format=","), alt.Tooltip("share:Q", format=".1%")],
+                )
+                .properties(height=240, width="container")
+            )
+            st.altair_chart(distribution_chart, width="stretch")
+
+            if st.button("Train full and reduced evaluations", key="train_serious_models"):
+                try:
+                    serious_outcome.validate_training_data(report_frame)
+                    with st.spinner("Training paired full and reduced evaluations…"):
+                        model_result = _train_seriousness_cached(report_frame)
+                    st.session_state["serious_model_result"] = model_result
+                    st.session_state["serious_model_data_key"] = current_data_key
+                except Exception as exc:
+                    st.error(
+                        "Model training was skipped or failed; existing dashboard sections are "
+                        f"unaffected. Details: {exc}"
+                    )
+
+            model_result = st.session_state.get("serious_model_result")
+            result_is_current = st.session_state.get("serious_model_data_key") == current_data_key
+            if (
+                model_result is not None
+                and result_is_current
+                and "feature_sets" not in model_result
+            ):
+                st.session_state.pop("serious_model_result", None)
+                st.session_state.pop("serious_model_data_key", None)
+                st.info(
+                    "The evaluation definition changed to include the proxy-metadata ablation. "
+                    "Train again to replace the older cached result."
+                )
+                model_result = None
+                result_is_current = False
+            if model_result is not None and result_is_current:
+                st.markdown("### Holdout evaluation")
+                st.info(model_result["split_description"])
+                comparison_display = model_result["comparison"].copy()
+                comparison_display["feature_set"] = pd.Categorical(
+                    comparison_display["feature_set"],
+                    categories=["Full", "Reduced"],
+                    ordered=True,
+                )
+                comparison_display = comparison_display.sort_values(
+                    ["model", "feature_set"]
+                )
+                st.dataframe(
+                    comparison_display.style.format({
+                        "precision": "{:.3f}",
+                        "recall": "{:.3f}",
+                        "f1": "{:.3f}",
+                        "roc_auc": "{:.3f}",
+                        "pr_auc_average_precision": "{:.3f}",
+                    }),
+                    width="stretch",
+                    hide_index=True,
+                )
+                st.caption(
+                    "Accuracy is intentionally not the headline metric. Precision, recall, F1, "
+                    "ROC-AUC, and PR-AUC are all computed on the same untouched holdout reports."
+                )
+
+                for _, delta_row in model_result["ablation_deltas"].iterrows():
+                    metric_changes = {
+                        "F1": float(delta_row["f1_change"]),
+                        "ROC-AUC": float(delta_row["roc_auc_change"]),
+                        "PR-AUC": float(delta_row["pr_auc_average_precision_change"]),
+                    }
+                    largest_drop = max(0.0, *[-value for value in metric_changes.values()])
+                    change_text = ", ".join(
+                        f"{metric} {change:+.3f}"
+                        for metric, change in metric_changes.items()
+                    )
+                    if largest_drop >= 0.05:
+                        st.warning(
+                            f"{delta_row['model']}: removing reporting-system metadata caused a "
+                            f"substantial held-out decrease ({change_text}). This suggests the full "
+                            "model's discrimination depended materially on those proxy-prone fields."
+                        )
+                    elif largest_drop <= 0.02:
+                        st.info(
+                            f"{delta_row['model']}: performance stayed broadly similar after the "
+                            f"ablation ({change_text}), so the measured discrimination was not "
+                            "strongly dependent on the removed metadata in this holdout."
+                        )
+                    else:
+                        st.info(
+                            f"{delta_row['model']}: the ablation produced a moderate change "
+                            f"({change_text}), indicating some dependence on proxy-prone metadata "
+                            "without accounting for all held-out discrimination."
+                        )
+
+                roc_parts = []
+                pr_parts = []
+                for feature_set, feature_result in model_result["feature_sets"].items():
+                    for model_name, evaluation in feature_result["evaluations"].items():
+                        series_name = f"{model_name} — {feature_set}"
+                        roc_parts.append(evaluation["roc_curve"].assign(series=series_name))
+                        pr_parts.append(evaluation["pr_curve"].assign(series=series_name))
+                roc_frame = pd.concat(roc_parts, ignore_index=True)
+                pr_frame = pd.concat(pr_parts, ignore_index=True)
+
+                curve_left, curve_right = st.columns(2)
+                with curve_left:
+                    st.markdown("#### ROC curves")
+                    roc_chart = (
+                        alt.Chart(roc_frame)
+                        .mark_line(strokeWidth=2)
+                        .encode(
+                            x=alt.X("false_positive_rate:Q", scale=alt.Scale(domain=[0, 1]), title="False-positive rate"),
+                            y=alt.Y("true_positive_rate:Q", scale=alt.Scale(domain=[0, 1]), title="True-positive rate"),
+                            color=alt.Color("series:N", title="Model and feature set"),
+                        )
+                        .properties(height=320)
+                    )
+                    diagonal = alt.Chart(pd.DataFrame({"x": [0, 1], "y": [0, 1]})).mark_line(
+                        color="#888", strokeDash=[5, 5]
+                    ).encode(x="x:Q", y="y:Q")
+                    st.altair_chart(roc_chart + diagonal, width="stretch")
+                with curve_right:
+                    st.markdown("#### Precision–recall curves")
+                    pr_chart = (
+                        alt.Chart(pr_frame)
+                        .mark_line(strokeWidth=2)
+                        .encode(
+                            x=alt.X("recall:Q", scale=alt.Scale(domain=[0, 1]), title="Recall"),
+                            y=alt.Y("precision:Q", scale=alt.Scale(domain=[0, 1]), title="Precision"),
+                            color=alt.Color("series:N", title="Model and feature set"),
+                        )
+                        .properties(height=320)
+                    )
+                    st.altair_chart(pr_chart, width="stretch")
+
+                st.markdown("### Threshold inspection")
+                threshold_feature_set = st.selectbox(
+                    "Feature set",
+                    list(model_result["feature_sets"].keys()),
+                    key="serious_threshold_feature_set",
+                )
+                selected_model = st.selectbox(
+                    "Model",
+                    list(model_result["feature_sets"][threshold_feature_set]["evaluations"].keys()),
+                    key="serious_confusion_model",
+                )
+                classification_threshold = st.slider(
+                    "Classification threshold",
+                    min_value=0.05,
+                    max_value=0.95,
+                    value=0.50,
+                    step=0.01,
+                    key="serious_classification_threshold",
+                    help=(
+                        "Reports at or above this predicted probability are classified as serious. "
+                        "Changing the threshold only recalculates held-out evaluation metrics."
+                    ),
+                )
+                selected_evaluation = model_result["feature_sets"][threshold_feature_set][
+                    "evaluations"
+                ][selected_model]
+                threshold_result = serious_outcome.threshold_metrics(
+                    selected_evaluation["held_out_labels"],
+                    selected_evaluation["held_out_probabilities"],
+                    threshold=classification_threshold,
+                )
+                metric_precision, metric_recall, metric_f1 = st.columns(3)
+                metric_precision.metric(
+                    "Holdout precision",
+                    f"{threshold_result['precision']:.3f}",
+                )
+                metric_recall.metric(
+                    "Holdout recall",
+                    f"{threshold_result['recall']:.3f}",
+                )
+                metric_f1.metric(
+                    "Holdout F1",
+                    f"{threshold_result['f1']:.3f}",
+                )
+
+                matrix = threshold_result["confusion_matrix"]
+                matrix_frame = pd.DataFrame([
+                    {"actual": "Non-serious", "predicted": "Non-serious", "reports": int(matrix[0, 0])},
+                    {"actual": "Non-serious", "predicted": "Serious", "reports": int(matrix[0, 1])},
+                    {"actual": "Serious", "predicted": "Non-serious", "reports": int(matrix[1, 0])},
+                    {"actual": "Serious", "predicted": "Serious", "reports": int(matrix[1, 1])},
+                ])
+                confusion_chart = (
+                    alt.Chart(matrix_frame)
+                    .mark_rect()
+                    .encode(
+                        x=alt.X("predicted:N", title="Predicted label"),
+                        y=alt.Y("actual:N", title="Actual label"),
+                        color=alt.Color("reports:Q", scale=alt.Scale(scheme="blues"), title="Reports"),
+                        tooltip=["actual:N", "predicted:N", alt.Tooltip("reports:Q", format=",")],
+                    )
+                    .properties(height=280)
+                )
+                labels = confusion_chart.mark_text(baseline="middle", fontSize=18).encode(
+                    text=alt.Text("reports:Q", format=","),
+                    color=alt.condition(alt.datum.reports > matrix_frame["reports"].max() / 2, alt.value("white"), alt.value("black")),
+                )
+                threshold_left, threshold_right = st.columns(2)
+                with threshold_left:
+                    st.markdown("#### Confusion matrix")
+                    st.altair_chart(confusion_chart + labels, width="stretch")
+                with threshold_right:
+                    st.markdown("#### Held-out predicted probabilities")
+                    probability_chart = (
+                        alt.Chart(selected_evaluation["probability_distribution"])
+                        .mark_bar(opacity=0.8)
+                        .encode(
+                            x=alt.X(
+                                "predicted_probability:Q",
+                                bin=alt.Bin(step=0.05),
+                                scale=alt.Scale(domain=[0, 1]),
+                                title="Predicted probability of a serious label",
+                            ),
+                            y=alt.Y("count():Q", title="Held-out reports"),
+                            color=alt.Color(
+                                "actual_class:N",
+                                scale=alt.Scale(
+                                    domain=["Non-serious", "Serious"],
+                                    range=["#4e79a7", "#e15759"],
+                                ),
+                                legend=None,
+                            ),
+                            tooltip=[
+                                alt.Tooltip("actual_class:N", title="Actual label"),
+                                alt.Tooltip("count():Q", title="Reports", format=","),
+                            ],
+                        )
+                        .properties(height=125)
+                        .facet(
+                            row=alt.Row(
+                                "actual_class:N",
+                                title="Actual label",
+                                sort=["Non-serious", "Serious"],
+                            )
+                        )
+                    )
+                    st.altair_chart(probability_chart, width="stretch")
+                st.caption(
+                    "The threshold controls the precision–recall tradeoff for the selected model. "
+                    "All values and both charts above use only the held-out test reports."
+                )
+
+                st.markdown("### Model interpretation")
+                interpretation_feature_set = st.selectbox(
+                    "Feature set for interpretation",
+                    list(model_result["feature_sets"].keys()),
+                    key="serious_interpretation_feature_set",
+                )
+                interpretation_result = model_result["feature_sets"][
+                    interpretation_feature_set
+                ]
+
+                st.markdown("#### Logistic Regression coefficients")
+                coefficient_frame = interpretation_result["logistic_coefficients"]
+                coefficient_extent = max(
+                    0.1, float(coefficient_frame["coefficient"].abs().max())
+                )
+                coefficient_bars = (
+                    alt.Chart(coefficient_frame)
+                    .mark_bar()
+                    .encode(
+                        x=alt.X(
+                            "coefficient:Q",
+                            scale=alt.Scale(
+                                domain=[-coefficient_extent * 1.18, coefficient_extent * 1.18]
+                            ),
+                            title="Coefficient for the serious-label model score",
+                        ),
+                        y=alt.Y(
+                            "feature:N",
+                            sort="x",
+                            title=None,
+                            axis=alt.Axis(labelLimit=520, labelFontSize=11),
+                        ),
+                        color=alt.Color(
+                            "association:N",
+                            scale=alt.Scale(
+                                domain=["Lower model score", "Higher model score"],
+                                range=["#4e79a7", "#e15759"],
+                            ),
+                            title="Coefficient direction",
+                        ),
+                        tooltip=[
+                            alt.Tooltip("feature:N", title="Feature"),
+                            alt.Tooltip("coefficient:Q", title="Coefficient", format="+.3f"),
+                            alt.Tooltip("association:N", title="Direction"),
+                        ],
+                    )
+                )
+                coefficient_zero = (
+                    alt.Chart(pd.DataFrame({"zero": [0]}))
+                    .mark_rule(color="#a0a0a0", strokeDash=[4, 4])
+                    .encode(x="zero:Q")
+                )
+                coefficient_positive_labels = (
+                    alt.Chart(coefficient_frame[coefficient_frame["coefficient"] >= 0])
+                    .mark_text(align="left", dx=5, fontSize=11)
+                    .encode(
+                        x="coefficient:Q",
+                        y=alt.Y("feature:N", sort="x"),
+                        text="coefficient_label:N",
+                    )
+                )
+                coefficient_negative_labels = (
+                    alt.Chart(coefficient_frame[coefficient_frame["coefficient"] < 0])
+                    .mark_text(align="right", dx=-5, fontSize=11)
+                    .encode(
+                        x="coefficient:Q",
+                        y=alt.Y("feature:N", sort="x"),
+                        text="coefficient_label:N",
+                    )
+                )
+                coefficient_chart = (
+                    coefficient_bars
+                    + coefficient_zero
+                    + coefficient_positive_labels
+                    + coefficient_negative_labels
+                ).properties(height=max(420, len(coefficient_frame) * 27))
+                st.altair_chart(coefficient_chart, width="stretch")
+
+                st.markdown("#### XGBoost feature importance")
+                importance_frame = interpretation_result["xgboost_importance"]
+                maximum_importance = max(
+                    0.01, float(importance_frame["importance_share"].max())
+                )
+                importance_bars = (
+                    alt.Chart(importance_frame)
+                    .mark_bar(color="#59a14f")
+                    .encode(
+                        x=alt.X(
+                            "importance_share:Q",
+                            scale=alt.Scale(domain=[0, maximum_importance * 1.20]),
+                            axis=alt.Axis(format="%"),
+                            title="Share of total model feature importance",
+                        ),
+                        y=alt.Y(
+                            "feature:N",
+                            sort="-x",
+                            title=None,
+                            axis=alt.Axis(labelLimit=520, labelFontSize=11),
+                        ),
+                        tooltip=[
+                            alt.Tooltip("feature:N", title="Feature"),
+                            alt.Tooltip(
+                                "importance_share:Q",
+                                title="Importance share",
+                                format=".2%",
+                            ),
+                        ],
+                    )
+                )
+                importance_labels = (
+                    alt.Chart(importance_frame)
+                    .mark_text(align="left", dx=5, fontSize=11)
+                    .encode(
+                        x="importance_share:Q",
+                        y=alt.Y("feature:N", sort="-x"),
+                        text="importance_label:N",
+                    )
+                )
+                importance_chart = (importance_bars + importance_labels).properties(
+                    height=max(380, len(importance_frame) * 28)
+                )
+                st.altair_chart(importance_chart, width="stretch")
+
+                st.caption(
+                    f"These {interpretation_feature_set.lower()}-set plots show variables associated "
+                    "with the models' serious-label scores. They do not establish that a feature "
+                    "causes a serious adverse event. "
+                    "SHAP is not included because its additional compiled dependency and runtime "
+                    "cost are disproportionate here; XGBoost's built-in feature importance is shown instead."
+                )
+        elif isinstance(report_frame, pd.DataFrame):
+            st.warning("No eligible report-level records were returned for these filters.")
+        else:
+            st.info(
+                "Choose a report limit and fetch real report-level data. Training does not run "
+                "automatically when another Streamlit control changes."
+            )
 
 # ====== Narratives NLP ======
 elif active_tab == "Narratives NLP":

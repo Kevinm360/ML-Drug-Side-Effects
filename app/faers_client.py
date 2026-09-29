@@ -280,3 +280,174 @@ def reaction_counts_for_drug(drug_name: str, start: str, end: str,
     results = js.get("results", []) or []
     return {(row.get("term") or "").upper(): int(row.get("count", 0))
             for row in results if row.get("term")}
+
+
+# ---------------- report-level seriousness classification data ----------------
+REPORT_LEVEL_COLUMNS = [
+    "safetyreportid",
+    "receivedate",
+    "serious",
+    "patient_age_years",
+    "patient_weight_kg",
+    "patient_sex",
+    "reporter_qualification",
+    "reporter_country",
+    "primary_source_country",
+    "occurrence_country",
+    "report_type",
+    "drug_count",
+    "reaction_count",
+    "primary_suspect_drug_count",
+    "concomitant_drug_count",
+    "interacting_drug_count",
+    "subject_drug_role",
+    "subject_drug_route",
+]
+
+
+def _as_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _age_in_years(value: Any, unit: Any) -> Optional[float]:
+    """Convert ICH age-unit codes to years without using any outcome field."""
+    age = _as_float(value)
+    if age is None or age < 0:
+        return None
+    factors = {
+        "800": 10.0,       # decade
+        "801": 1.0,        # year
+        "802": 1.0 / 12.0, # month
+        "803": 1.0 / 52.0, # week
+        "804": 1.0 / 365.25, # day
+        "805": 1.0 / (365.25 * 24.0), # hour
+    }
+    factor = factors.get(str(unit))
+    return age * factor if factor is not None else None
+
+
+def _subject_drug(drugs: list, drug_name: str) -> Dict[str, Any]:
+    """Return the queried drug entry when possible, otherwise the first drug entry."""
+    wanted = str(drug_name or "").strip().casefold()
+    for drug in drugs:
+        if not isinstance(drug, dict):
+            continue
+        product = str(drug.get("medicinalproduct") or "").casefold()
+        if wanted and wanted in product:
+            return drug
+    return next((d for d in drugs if isinstance(d, dict)), {})
+
+
+def _report_level_row(report: Dict[str, Any], drug_name: str) -> Optional[Dict[str, Any]]:
+    """Flatten one real FAERS report into a leakage-controlled modeling row."""
+    serious_code = str(report.get("serious") or "")
+    if serious_code not in {"1", "2"}:
+        return None
+
+    patient = report.get("patient") if isinstance(report.get("patient"), dict) else {}
+    primary_source = (
+        report.get("primarysource") if isinstance(report.get("primarysource"), dict) else {}
+    )
+    drugs = patient.get("drug") if isinstance(patient.get("drug"), list) else []
+    reactions = patient.get("reaction") if isinstance(patient.get("reaction"), list) else []
+    subject_drug = _subject_drug(drugs, drug_name)
+    roles = [str(d.get("drugcharacterization") or "") for d in drugs if isinstance(d, dict)]
+
+    # Only the binary target is retained from the outcome fields. In particular,
+    # seriousness subtypes, reaction outcomes, patient death, and the existing
+    # severity score are never copied into this report-level table.
+    return {
+        "safetyreportid": report.get("safetyreportid"),
+        "receivedate": report.get("receivedate"),
+        "serious": 1 if serious_code == "1" else 0,
+        "patient_age_years": _age_in_years(
+            patient.get("patientonsetage"), patient.get("patientonsetageunit")
+        ),
+        "patient_weight_kg": _as_float(patient.get("patientweight")),
+        "patient_sex": patient.get("patientsex"),
+        "reporter_qualification": primary_source.get("qualification"),
+        "reporter_country": primary_source.get("reportercountry"),
+        "primary_source_country": report.get("primarysourcecountry"),
+        "occurrence_country": report.get("occurcountry"),
+        "report_type": report.get("reporttype"),
+        "drug_count": len(drugs),
+        "reaction_count": len(reactions),
+        "primary_suspect_drug_count": roles.count("1"),
+        "concomitant_drug_count": roles.count("2"),
+        "interacting_drug_count": roles.count("3"),
+        "subject_drug_role": subject_drug.get("drugcharacterization"),
+        "subject_drug_route": subject_drug.get("drugadministrationroute"),
+    }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def report_level_reports(
+    drug_name: str,
+    start: str,
+    end: str,
+    max_records: int = 3000,
+    search_extra: str = "",
+):
+    """
+    Fetch real report-level FAERS records for seriousness classification.
+
+    The capped sample is distributed across the requested date window instead
+    of taking only the earliest API page, then ordered by receipt date.
+    The returned table contains the target plus a deliberately small set of
+    non-outcome candidate predictors; no seriousness subtype is returned.
+    """
+    import pandas as pd
+
+    requested = max(1, min(int(max_records), 5000))
+    rows = []
+    start_date = pd.to_datetime(start, format="%Y%m%d", errors="coerce")
+    end_date = pd.to_datetime(end, format="%Y%m%d", errors="coerce")
+    if pd.isna(start_date) or pd.isna(end_date) or start_date > end_date:
+        raise ValueError("start and end must be valid YYYYMMDD dates with start <= end")
+
+    span_days = int((end_date - start_date).days) + 1
+    # Up to ten temporal buckets prevents a capped result from representing only
+    # the beginning of a long date range. Each bucket stays below the API's
+    # 1,000-record page maximum.
+    bucket_count = min(10, span_days, requested)
+    base_allocation, extra = divmod(requested, bucket_count)
+
+    for bucket in range(bucket_count):
+        bucket_start = start_date + pd.Timedelta(days=(span_days * bucket) // bucket_count)
+        bucket_end = start_date + pd.Timedelta(days=(span_days * (bucket + 1)) // bucket_count - 1)
+        allocation = base_allocation + (1 if bucket < extra else 0)
+        query = (
+            f'patient.drug.medicinalproduct:"{drug_name.upper()}" AND '
+            f'receivedate:[{bucket_start:%Y%m%d} TO {bucket_end:%Y%m%d}]'
+        )
+        if search_extra:
+            query += search_extra
+        for bucket_skip in range(0, allocation, 1000):
+            page_size = min(1000, allocation - bucket_skip)
+            payload = _request({
+                "search": query,
+                "sort": "receivedate:asc",
+                "limit": page_size,
+                "skip": bucket_skip,
+            })
+            reports = payload.get("results", []) or []
+            for report in reports:
+                if isinstance(report, dict):
+                    row = _report_level_row(report, drug_name)
+                    if row is not None:
+                        rows.append(row)
+            if len(reports) < page_size:
+                break
+
+    if not rows:
+        return pd.DataFrame(columns=REPORT_LEVEL_COLUMNS)
+
+    frame = pd.DataFrame(rows, columns=REPORT_LEVEL_COLUMNS)
+    frame["receivedate"] = pd.to_datetime(
+        frame["receivedate"], format="%Y%m%d", errors="coerce"
+    )
+    frame = frame.drop_duplicates(subset=["safetyreportid"], keep="last")
+    return frame.sort_values(["receivedate", "safetyreportid"], na_position="last").reset_index(drop=True)

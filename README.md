@@ -2,67 +2,119 @@
 
 ![Dashboard Preview](screenshot.png)
 
-## TL;DR
+A Streamlit dashboard for exploring FDA adverse event reports and spotting unusual drug-side effect patterns.
 
-This project uses FDA adverse event reports to look for unusual drug side-effect patterns and test whether machine learning can help identify reports that are more likely to be classified as serious.
+The project started as a signal detection tool and later grew into something a little more ambitious: it now also compares machine learning models that try to identify whether a submitted FAERS report is likely to be classified as serious.
 
-In plain English: it looks for weird reporting spikes, unusually common drug-reaction combinations, and patterns that separate serious reports from non-serious ones.
+Basically, it went from “show me weird reporting patterns” to “okay, what else can we learn from these reports?”
 
-I used two classification models:
+---
 
-- **Logistic Regression** as the simpler, easier-to-explain baseline
-- **XGBoost** to pick up more complicated patterns between report features
+## Demo
 
-The dashboard compares both models using metrics like precision, recall, F1, ROC-AUC, and PR-AUC. It also lets you change the classification threshold and immediately see how that changes false positives and missed serious cases.
+![Dashboard Demo](demo.gif)
 
-One thing I paid close attention to was **data leakage**. FAERS includes fields like hospitalization, death, and other outcome indicators that would basically hand the model the answer. Those are excluded from training because that would be cheating, and unfortunately the model does not get to peek at the answer key.
+---
 
-I also tested a reduced version of the model with several reporter and reporting-system fields removed. The goal was to see whether the model was learning useful report patterns or just getting suspiciously good at recognizing how reports were submitted.
+## What It Does
 
-## What the Dashboard Covers
+The dashboard lets users explore FDA Adverse Event Reporting System (FAERS) data by drug and look at:
 
-The app includes:
+- Commonly reported side effects
+- Changes in reporting volume over time
+- Sudden spikes in specific reactions
+- Differences across age and sex groups
+- Drug-reaction signals using PRR and ROR
+- Serious vs. non-serious report classification
 
-- Adverse event trends over time
-- Common reported reactions
-- PRR and ROR safety signals
-- Reporting spikes and burst detection
-- Demographic filtering
-- Drug comparisons
-- Serious outcome classification
-- Model performance charts
-- Feature importance
-- Adjustable classification thresholds
+The goal is to surface patterns worth investigating, not to prove that a drug caused an event.
 
-## Data
+---
 
-The project uses the FDA Adverse Event Reporting System, or **FAERS**, through openFDA.
+## Serious Outcome Classification
 
-FAERS is useful for finding reporting patterns, but it has limits. Reports can be incomplete, duplicated, biased, or missing important information.
+The dashboard includes a classification section that predicts whether a FAERS report is labeled as **serious**.
 
-Because of that, this project does **not** claim that a drug caused a side effect or that a model can predict someone’s personal medical risk.
+I compare two models:
 
-It is a signal-detection and analysis tool, not Dr. House.
+**Logistic Regression**  
+Used as a simple, interpretable baseline.
 
-## Tech Used
+**XGBoost**  
+Used to capture more complex relationships between report characteristics.
 
-- Python
-- pandas
-- NumPy
-- scikit-learn
-- XGBoost
-- Streamlit
-- Plotly
-- Altair
-- openFDA / FAERS
+The models use information such as:
 
-## Running the Project
+- Patient demographics
+- Number of drugs listed
+- Number of reported reactions
+- Route of administration
+- Drug role information
+- Reporter and report characteristics
+
+Fields that directly reveal the outcome, such as hospitalization or death indicators, are excluded so the model cannot simply cheat its way to a good score.
+
+---
+
+## Model Evaluation
+
+The models are tested on held-out reports and compared using:
+
+- Precision
+- Recall
+- F1 score
+- ROC-AUC
+- PR-AUC
+- Confusion matrices
+- ROC and precision-recall curves
+
+The dashboard also includes an adjustable classification threshold so users can see how changing the cutoff affects false positives and missed serious reports.
+
+Because one score is never enough. Unfortunately.
+
+---
+
+## Checking for Reporting Bias
+
+FAERS contains a lot of information about how a report was submitted, not just what happened medically.
+
+That means a model could accidentally learn reporting habits instead of meaningful case characteristics.
+
+To check this, the dashboard also trains reduced versions of the models with several reporting-related variables removed and compares performance using the same train/test split.
+
+This helps show how much of the model's performance may depend on reporting-system metadata.
+
+---
+
+## Important Limitation
+
+FAERS is a spontaneous reporting database, so the data includes missing values, duplicate reports, under-reporting, and reporting bias.
+
+The models do **not** predict a patient's personal medical risk and do not establish that a drug caused a specific reaction.
+
+They classify patterns found in submitted FAERS reports.
+
+In other words: useful for analysis, not a replacement for your doctor.
+
+---
+
+## Tech Stack
+
+- **Python**
+- **Streamlit**
+- **pandas / NumPy**
+- **scikit-learn**
+- **XGBoost**
+- **Plotly / Altair**
+- **openFDA / FAERS**
+- **PRR / ROR signal detection**
+
+---
+
+## Quickstart
 
 ```bash
 git clone https://github.com/Kevinm360/ML-Drug-Side-Effects.git
 cd ML-Drug-Side-Effects
 
 python -m venv .venv
-pip install -r requirements.txt
-
-streamlit run app/streamlit_app.py

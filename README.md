@@ -118,3 +118,6 @@ git clone https://github.com/Kevinm360/ML-Drug-Side-Effects.git
 cd ML-Drug-Side-Effects
 
 python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+streamlit run app/streamlit_app.py
